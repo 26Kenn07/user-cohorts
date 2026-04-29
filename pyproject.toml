@@ -1,0 +1,22 @@
+[project]
+name = "user-cohort"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic",
+    "pydantic_settings",
+    "anthropic",
+    "db",
+    "utils",
+    "models",
+]
+
+[tool.uv.workspace]
+members = ["db", "utils", "models"]
+
+[tool.uv.sources]
+db = { workspace = true }
+utils = { workspace = true }
+models = { workspace = true }

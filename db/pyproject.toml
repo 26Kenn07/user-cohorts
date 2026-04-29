@@ -1,0 +1,18 @@
+[project]
+name = "db"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { email = "kirtan.m@begenuin.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "clickhouse-connect",
+    "opensearch-py[async]",
+    "pandas"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
