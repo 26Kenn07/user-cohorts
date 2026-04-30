@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
+BRAND_IDS = "(1729, 2023, 2075, 2556, 2558, 2314, 2357, 2023, 2476, 2557, 2701, 2764, 2790, 2793, 2801, 2808, 3099)"
 BRAND_ID    = 2357
 DATE_START  = "2026-01-01"
 DATE_END    = "2026-04-28"
@@ -54,7 +55,7 @@ async def get_all_events() -> pd.DataFrame:
     if cached is not None:
         return cached  # type: ignore[return-value]
     df = await get_user_data_by_brand_id(
-        brand_id=BRAND_ID, start_date=DATE_START, end_date=DATE_END
+        brand_id=BRAND_IDS, start_date=DATE_START, end_date=DATE_END
     )
     _save("all_events", df)
     return df
@@ -280,8 +281,8 @@ async def main():
     model = TwoTowerModel(
         n_users=index_maps.n_users,
         n_brands=index_maps.n_brands,
-        backbone_dim=384,
-        output_dim=128,
+        backbone_dim=768,
+        output_dim=512,
         temperature=10.0,
     )
     losses = train(model, dataset, epochs=50, batch_size=256, lr=1e-3)

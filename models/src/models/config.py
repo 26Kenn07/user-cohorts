@@ -25,6 +25,14 @@ class OpenSearchConfig(BaseSettings):
     password: str = Field(default="", alias="OS_PASS")
     os_verify: bool = Field(default=False, alias="OS_VERIFY")
     
+class MilvusConfig(BaseSettings):
+    model_config = MODEL_CONFIG
+    
+    uri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
+    video_collection: str = Field(default="video_embeddings", alias="VIDEO_COLLECTION")
+    user_collection: str = Field(default="user_embeddings", alias="USER_COLLECTION")
+    
+    
     
     
 class AppConfig(BaseSettings):
@@ -35,6 +43,7 @@ class AppConfig(BaseSettings):
     
     
 __all__ = [
+    "AppConfig",
     "ClickHouseConfig",
-    "AppConfig"
+    "MilvusConfig"
 ]

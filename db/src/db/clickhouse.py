@@ -7,10 +7,11 @@ logger = logging.getLogger(__name__)
 
 
 async def get_user_data_by_brand_id(
-    brand_id: int,
+    brand_ids: str,
     start_date: str,
     end_date: str,
     limit: int = 50000,
+    offset: int = 0,
 ) -> "pd.DataFrame":  # type: ignore[name-defined]
     client = await get_async_client(
         host=settings.clickhouse.host,
@@ -57,13 +58,14 @@ async def get_user_data_by_brand_id(
         2
         ) AS watch_percentage
     from genuin_events_logs_001
-    where brand_id = {brand_id}
+    where brand_id in {brand_ids}
         and event IN ('video_impression', 'video_watched', 'video_sparked', 'video_shared', 'commented_on_video')
         and report_date BETWEEN '{start_date}' AND '{end_date}'
     group by brand_id, user_id, identity_type, video_id, report_date
     HAVING views >= 1
     order by user_id
     limit {limit}
+    offset {offset}
     """
 
     try:

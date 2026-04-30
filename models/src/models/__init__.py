@@ -1,4 +1,4 @@
-from .config import ClickHouseConfig, OpenSearchConfig, AppConfig
+from .config import ClickHouseConfig, OpenSearchConfig, AppConfig, MilvusConfig
 from .two_tower import (
     TwoTowerModel,
     EngagementDataset,
@@ -12,6 +12,7 @@ __all__ = [
     "ClickHouseConfig",
     "OpenSearchConfig",
     "AppConfig",
+    "MilvusConfig",
     "TwoTowerModel",
     "EngagementDataset",
     "IndexMaps",

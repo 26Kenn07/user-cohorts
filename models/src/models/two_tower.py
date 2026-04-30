@@ -17,14 +17,14 @@ class VideoTower(nn.Module):
     Frozen sentence-transformer backbone + trainable MLP projection.
     The backbone produces rich semantic embeddings — we only finetune the MLP.
     """
-    def __init__(self, backbone_dim: int = 384, output_dim: int = 128):
+    def __init__(self, backbone_dim: int = 768, output_dim: int = 512):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(backbone_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(backbone_dim, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(256, output_dim),
+            nn.Linear(512, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -35,8 +35,8 @@ class UserTower(nn.Module):
     """
     YouTube DNN-style user tower.
     Inputs:
-      - user_idx:           learnable per-user embedding (0 = unknown/new user)
-      - brand_idx:          learnable per-brand embedding
+      - user_idx:            learnable per-user embedding (0 = unknown/new user)
+      - brand_idx:           learnable per-brand embedding
       - engagement_features: raw signals (watch_ratio, views, likes, shares, comments)
 
     New users get user_idx=0 (padding_idx) — model falls back to brand + engagement signals.
@@ -46,28 +46,28 @@ class UserTower(nn.Module):
         self,
         n_users: int,
         n_brands: int,
-        user_embed_dim: int = 64,
-        brand_embed_dim: int = 32,
-        output_dim: int = 128,
+        user_embed_dim: int = 128,
+        brand_embed_dim: int = 64,
+        output_dim: int = 512,
     ):
         super().__init__()
         # padding_idx=0 → new users get zero embedding, not updated during training
-        self.user_embed  = nn.Embedding(n_users + 1, user_embed_dim, padding_idx=0)
-        self.brand_embed = nn.Embedding(n_brands, brand_embed_dim)
+        self.user_embed    = nn.Embedding(n_users + 1, user_embed_dim, padding_idx=0)
+        self.brand_embed   = nn.Embedding(n_brands, brand_embed_dim)
         self.engagement_fc = nn.Sequential(
-            nn.Linear(ENGAGEMENT_DIM, 32),
+            nn.Linear(ENGAGEMENT_DIM, 64),
             nn.ReLU(),
         )
 
-        mlp_input_dim = user_embed_dim + brand_embed_dim + 32
+        mlp_input_dim = user_embed_dim + brand_embed_dim + 64
         self.mlp = nn.Sequential(
-            nn.Linear(mlp_input_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(mlp_input_dim, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(256, 128),
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(128, output_dim),
+            nn.Linear(256, output_dim),
         )
 
     def forward(
@@ -87,8 +87,8 @@ class TwoTowerModel(nn.Module):
         self,
         n_users: int,
         n_brands: int,
-        backbone_dim: int = 384,
-        output_dim: int = 128,
+        backbone_dim: int = 768,
+        output_dim: int = 512,
         temperature: float = 10.0,
     ):
         super().__init__()

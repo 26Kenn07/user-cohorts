@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 _model: SentenceTransformer | None = None
 
+BACKBONE_MODEL = "all-mpnet-base-v2"   # 768d, 110M params — significantly better than MiniLM
+
 WEIGHTS = {
     "transcript": 0.4,
     "description_text": 0.3,
@@ -27,8 +29,8 @@ def _get_model() -> SentenceTransformer:
             device = "cuda"
         else:
             device = "cpu"
-        logger.info(f"Loading sentence-transformer model on {device}...")
-        _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+        logger.info(f"Loading {BACKBONE_MODEL} on {device}...")
+        _model = SentenceTransformer(BACKBONE_MODEL, device=device)
     return _model
 
 
