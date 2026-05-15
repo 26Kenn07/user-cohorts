@@ -34,7 +34,7 @@ This is a **uv workspace** with four packages: `db`, `utils`, `models`, and a ro
 
 ### Two-Tower Model (`models/src/models/two_tower.py`)
 
-**VideoTower** — takes a 384d sentence-transformer embedding (precomputed, frozen backbone) and projects through a trainable MLP to 128d.
+**VideoTower** — takes a **768d** sentence-transformer embedding (precomputed, frozen backbone) and projects through a trainable MLP to **512d**.
 
 **UserTower** — YouTube DNN-style. Takes:
 - `user_idx`: learnable embedding per user (`padding_idx=0` for unknown/new users)
@@ -62,17 +62,25 @@ OpenSearch (videos)    →  embed_videos (ST backbone)  →  VideoTower MLP
 
 All expensive steps are cached to `cache/*.pkl`. Delete selectively to re-run specific steps.
 
+**Current state of `test.py`**: The full training pipeline above is commented out. The active code is a ClickHouse data-fetching script that pages through ~28M rows across 17 brand IDs and saves them to `ck_user_events.csv`.
+
 ### Engagement Scoring (`utils/src/utils/engagement.py`)
 
 Score per `(user, video)` = `(watch_percentage/100)*1.0 + views_capped*0.5 + likes*3.0 + shares*5.0 + comments*3.0`, normalized to [0,1] per brand.
 
 ### Video Embedding (`utils/src/utils/embeddings.py`)
 
-Weighted combination: transcript (0.4) + description (0.3) + AI description (0.2) + mean(keyword embeddings) (0.1). Missing fields are skipped gracefully. Uses `sentence-transformers/all-MiniLM-L6-v2` on MPS/CUDA/CPU auto-detected.
+Backbone: **`all-mpnet-base-v2`** (768d, 110M params). Weighted combination: transcript (0.4) + description (0.3) + AI description (0.2) + mean(keyword embeddings) (0.1). Missing fields are skipped gracefully. Device auto-detected: MPS/CUDA/CPU.
+
+> Note: `embed_users()` has a stale default `dim=384` — should be 768 to match the backbone.
 
 ### Cohort Clustering (`utils/src/utils/cohort.py`)
 
-K-Means on finetuned 128d user embeddings. Optimal k found via silhouette score (k=3–8). Cohort profiles built from top engagement-weighted keywords across member videos.
+K-Means on finetuned **512d** user embeddings. Optimal k found via silhouette score (k=3–8). Cohort profiles built from top engagement-weighted keywords across member videos.
+
+### Prompt Generation (`utils/src/utils/prompt_generator.py`)
+
+Uses Claude (`claude-sonnet-4-6`) to generate search prompts per cohort based on top keywords. **Known bug**: line 28 has a bare `return` before all logic, causing `generate_prompts_for_cohort()` to always return `None`.
 
 ### Multi-Brand Design
 
@@ -81,5 +89,5 @@ K-Means on finetuned 128d user embeddings. Optimal k found via silhouette score 
 - One shared model across all brands — per-brand models are not used (data too sparse per brand).
 
 ### Milvus (planned)
-- One collection for video embeddings (128d, finetuned), filtered by `brand_id` at query time.
+- One collection for video embeddings (512d, finetuned), filtered by `brand_id` at query time.
 - User embeddings computed at request time via `get_user_embedding()` — not stored permanently since they update with each interaction.

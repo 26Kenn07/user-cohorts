@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +15,8 @@ BACKBONE_MODEL = "all-mpnet-base-v2"   # 768d, 110M params — significantly bet
 WEIGHTS = {
     "transcript": 0.4,
     "description_text": 0.3,
-    "video_gen_description": 0.2,
-    "keywords": 0.1,
+    "video_gen_description": 0.25,
+    "keywords": 0.05,
 }
 
 
@@ -34,68 +35,100 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
-def _embed_texts(texts: list[str]) -> np.ndarray:
-    model = _get_model()
-    return model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+_TEXT_FIELDS = [
+    ("transcript", WEIGHTS["transcript"]),
+    ("description_text", WEIGHTS["description_text"]),
+    ("video_gen_description", WEIGHTS["video_gen_description"]),
+]
 
 
-def _embed_video(video: dict[str, Any]) -> np.ndarray:
+def embed_videos(
+    videos: list[dict[str, Any]],
+    batch_size: int = 512,
+) -> dict[str, np.ndarray]:
+    """
+    Returns a dict of video_id -> embedding (768d, L2 normalized).
+    Batches all text into a single GPU encode pass per field for speed.
+    """
     model = _get_model()
     dim = model.get_embedding_dimension()
     assert dim is not None
 
-    weighted_sum = np.zeros(dim)
-    total_weight = 0.0
+    n = len(videos)
+    logger.info(f"Embedding {n} videos (batched, batch_size={batch_size})...")
 
-    # Embed transcript, description, ai description — each as one text block
-    for field, weight in [
-        ("transcript", WEIGHTS["transcript"]),
-        ("description_text", WEIGHTS["description_text"]),
-        ("video_gen_description", WEIGHTS["video_gen_description"]),
-    ]:
-        text = video.get(field, "").strip()
-        if not text:
-            continue
-        embedding = _embed_texts([text])[0]
-        weighted_sum += embedding * weight
-        total_weight += weight
+    field_embeddings: dict[str, np.ndarray] = {}
+    field_masks: dict[str, np.ndarray] = {}
 
-    # Embed each keyword separately, then average them
-    keywords: list[str] = [kw for kw in (video.get("keywords") or []) if kw.strip()]
-    if keywords:
-        keyword_embeddings = _embed_texts(keywords)
-        keyword_avg = keyword_embeddings.mean(axis=0)
-        weighted_sum += keyword_avg * WEIGHTS["keywords"]
-        total_weight += WEIGHTS["keywords"]
+    for field, _ in _TEXT_FIELDS:
+        texts: list[str] = []
+        mask = np.zeros(n, dtype=bool)
+        for i, v in enumerate(videos):
+            t = v.get(field, "").strip()
+            texts.append(t if t else "")
+            if t:
+                mask[i] = True
 
-    if total_weight == 0:
-        return np.zeros(dim)
+        logger.info(f"  Encoding field '{field}' ({int(mask.sum())} non-empty)...")
+        embs = model.encode(
+            texts, batch_size=batch_size, convert_to_numpy=True,
+            show_progress_bar=True,
+        )
+        field_embeddings[field] = embs
+        field_masks[field] = mask
 
-    final = weighted_sum / total_weight
-    # L2 normalize so dot product == cosine similarity in Milvus
-    norm = np.linalg.norm(final)
-    return final / norm if norm > 0 else final
+    kw_texts: list[str] = []
+    kw_indices: list[int] = []
+    kw_counts: list[int] = []
+    for i, v in enumerate(videos):
+        keywords = [kw for kw in (v.get("keywords") or []) if kw.strip()]
+        if keywords:
+            kw_indices.append(i)
+            kw_counts.append(len(keywords))
+            kw_texts.extend(keywords)
 
+    kw_avg = np.zeros((n, dim), dtype=np.float32)
+    kw_mask = np.zeros(n, dtype=bool)
+    if kw_texts:
+        logger.info(f"  Encoding {len(kw_texts)} keywords for {len(kw_indices)} videos...")
+        all_kw_embs = model.encode(
+            kw_texts, batch_size=batch_size, convert_to_numpy=True,
+            show_progress_bar=True,
+        )
+        offset = 0
+        for idx, count in zip(kw_indices, kw_counts):
+            kw_avg[idx] = all_kw_embs[offset : offset + count].mean(axis=0)
+            kw_mask[idx] = True
+            offset += count
 
-def embed_videos(videos: list[dict[str, Any]]) -> dict[str, np.ndarray]:
-    """
-    Returns a dict of video_id -> embedding (384d, L2 normalized).
-    Videos with no content get a zero vector and are flagged.
-    """
-    logger.info(f"Embedding {len(videos)} videos...")
-    result = {}
+    logger.info("  Combining weighted embeddings...")
+    result: dict[str, np.ndarray] = {}
     zero_count = 0
 
-    for video in videos:
-        vid_id = video["video_id"]
-        embedding = _embed_video(video)
-        result[vid_id] = embedding
-        if np.all(embedding == 0):
+    for i, v in enumerate(tqdm(videos, desc="Combining embeddings")):
+        weighted_sum = np.zeros(dim, dtype=np.float32)
+        total_weight = 0.0
+
+        for field, weight in _TEXT_FIELDS:
+            if field_masks[field][i]:
+                weighted_sum += field_embeddings[field][i] * weight
+                total_weight += weight
+
+        if kw_mask[i]:
+            weighted_sum += kw_avg[i] * WEIGHTS["keywords"]
+            total_weight += WEIGHTS["keywords"]
+
+        if total_weight == 0:
+            result[v["video_id"]] = np.zeros(dim)
             zero_count += 1
-            logger.warning(f"video_id {vid_id} has no content — zero vector assigned")
+            continue
+
+        final = weighted_sum / total_weight
+        norm = np.linalg.norm(final)
+        result[v["video_id"]] = final / norm if norm > 0 else final
 
     if zero_count:
-        logger.warning(f"{zero_count}/{len(videos)} videos have zero embeddings")
+        logger.warning(f"{zero_count}/{n} videos have zero embeddings")
 
     logger.info("Video embedding complete.")
     return result

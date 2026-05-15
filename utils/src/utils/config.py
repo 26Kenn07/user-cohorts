@@ -1,5 +1,5 @@
 from functools import lru_cache
-from models import AppConfig, ClickHouseConfig, OpenSearchConfig
+from models import AppConfig, ClickHouseConfig, MilvusConfig, OpenSearchConfig
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     clickhouse: ClickHouseConfig = Field(default_factory=ClickHouseConfig)
     opensearch: OpenSearchConfig = Field(default_factory=OpenSearchConfig)
+    milvus: MilvusConfig = Field(default_factory=MilvusConfig)
     app: AppConfig = Field(default_factory=AppConfig)
 
     @property

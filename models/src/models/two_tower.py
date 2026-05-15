@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 
 logger = logging.getLogger(__name__)
 
-ENGAGEMENT_DIM = 5   # watch_ratio, views (capped), likes, shares, comments
+ENGAGEMENT_DIM = 6   # watch_ratio, views (capped), likes, shares, comments, link_clicks
 
 
 class VideoTower(nn.Module):
@@ -110,22 +110,31 @@ class TwoTowerModel(nn.Module):
 
 class IndexMaps:
     """
-    Maps string user_ids and brand_ids to integer indices for embedding lookups.
-    user_idx=0 is reserved for unknown/new users.
+    Maps (user_id, brand_id) pairs and brand_ids to integer indices.
+    A user active on 3 brands gets 3 separate embedding slots.
+    user_idx=0 is reserved for unknown/new (user, brand) pairs.
     """
     def __init__(self, df: pd.DataFrame):
-        users  = df["user_id"].astype(str).unique().tolist()
+        pairs = (
+            df[["user_id", "brand_id"]]
+            .astype(str)
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
         brands = df["brand_id"].astype(str).unique().tolist()
 
-        # 0 = unknown user, known users start at 1
-        self.user_to_idx:  dict[str, int] = {u: i + 1 for i, u in enumerate(users)}
-        self.brand_to_idx: dict[str, int] = {b: i     for i, b in enumerate(brands)}
+        # 0 = unknown pair, known pairs start at 1
+        self.pair_to_idx:  dict[tuple[str, str], int] = {
+            (row.user_id, row.brand_id): i + 1
+            for i, row in enumerate(pairs.itertuples(index=False))
+        }
+        self.brand_to_idx: dict[str, int] = {b: i for i, b in enumerate(brands)}
 
-        self.n_users  = len(users)
+        self.n_users  = len(pairs)    # = number of (user, brand) pairs
         self.n_brands = len(brands)
 
-    def get_user_idx(self, user_id: str) -> int:
-        return self.user_to_idx.get(str(user_id), 0)   # 0 = new/unknown user
+    def get_user_idx(self, user_id: str, brand_id: str) -> int:
+        return self.pair_to_idx.get((str(user_id), str(brand_id)), 0)
 
     def get_brand_idx(self, brand_id: str) -> int:
         return self.brand_to_idx.get(str(brand_id), 0)
@@ -133,85 +142,107 @@ class IndexMaps:
 
 class EngagementDataset(Dataset):
     """
-    Each sample: (user_idx, brand_idx, engagement_features, video_embedding, label)
+    Each sample: (user_idx, brand_idx, engagement_features, pos_vid_emb, neg_vid_embs)
 
+    Structured for InfoNCE loss — each positive is paired with negative_ratio negatives.
     Positives: rows with score >= positive_threshold
-    Negatives: random unwatched videos per user, negative_ratio per positive
+    Negatives: hard_negative_ratio semantically similar (backbone cosine) unwatched videos
+               + (negative_ratio - hard_negative_ratio) random unwatched videos.
     """
     def __init__(
         self,
         engagement_df: pd.DataFrame,
         index_maps: IndexMaps,
         video_embeddings: dict[str, np.ndarray],
-        positive_threshold: float = 0.05,
+        positive_threshold: float = 0.1,
         negative_ratio: int = 4,
+        hard_negative_ratio: int = 2,
     ):
         self.samples: list[tuple] = []
+        self.negative_ratio = negative_ratio
         all_video_ids = list(video_embeddings.keys())
 
-        for user_id, group in engagement_df.groupby("user_id"):
-            user_idx  = index_maps.get_user_idx(str(user_id))
-            brand_idx = index_maps.get_brand_idx(str(group["brand_id"].iloc[0]))
+        # Precompute normalized video matrix for fast cosine similarity
+        vid_matrix = np.stack([video_embeddings[v] for v in all_video_ids]).astype(np.float32)
+        norms = np.linalg.norm(vid_matrix, axis=1, keepdims=True)
+        vid_matrix_norm = vid_matrix / (norms + 1e-8)
+        vid_to_idx = {v: i for i, v in enumerate(all_video_ids)}
+
+        n_hard   = min(hard_negative_ratio, negative_ratio)
+        n_random = negative_ratio - n_hard
+
+        for (user_id, brand_id), group in engagement_df.groupby(["user_id", "brand_id"]):
+            user_idx  = index_maps.get_user_idx(str(user_id), str(brand_id))
+            brand_idx = index_maps.get_brand_idx(str(brand_id))
             watched   = set(group["video_id"].tolist())
+
+            unwatched_mask = np.ones(len(all_video_ids), dtype=bool)
+            for v in watched:
+                if v in vid_to_idx:
+                    unwatched_mask[vid_to_idx[v]] = False
+            unwatched_indices = np.where(unwatched_mask)[0]
+
+            if len(unwatched_indices) < negative_ratio:
+                continue
 
             positives = group[group["score"] >= positive_threshold]
             for _, row in positives.iterrows():
-                vid_emb = video_embeddings.get(row["video_id"])
-                if vid_emb is None:
+                pos_emb = video_embeddings.get(row["video_id"])
+                if pos_emb is None:
                     continue
+
                 eng = self._engagement_features(row)
-                self.samples.append((user_idx, brand_idx, eng, vid_emb, 1.0))
 
-            # Hard negatives: unwatched videos
-            unwatched = [v for v in all_video_ids if v not in watched]
-            n_neg = min(len(positives) * negative_ratio, len(unwatched))
-            if n_neg == 0:
-                continue
-            neg_ids = np.random.choice(unwatched, size=n_neg, replace=False)
+                if n_hard > 0:
+                    # Hard negatives: unwatched videos most similar to positive in backbone space
+                    pos_norm    = pos_emb / (np.linalg.norm(pos_emb) + 1e-8)
+                    sims        = vid_matrix_norm[unwatched_indices] @ pos_norm
+                    hard_local  = np.argpartition(sims, -n_hard)[-n_hard:]
+                    hard_global = unwatched_indices[hard_local]
+                    remaining_mask = np.ones(len(unwatched_indices), dtype=bool)
+                    remaining_mask[hard_local] = False
+                    remaining_indices = unwatched_indices[remaining_mask]
+                else:
+                    hard_global       = np.array([], dtype=np.int64)
+                    remaining_indices = unwatched_indices
 
-            # For negatives, use the user's average engagement as context
-            avg_eng = self._avg_engagement(group)
-            for vid_id in neg_ids:
-                vid_emb = video_embeddings.get(vid_id)
-                if vid_emb is None:
+                if len(remaining_indices) < n_random:
                     continue
-                self.samples.append((user_idx, brand_idx, avg_eng, vid_emb, 0.0))
+                random_local  = np.random.choice(len(remaining_indices), size=n_random, replace=False)
+                random_global = remaining_indices[random_local]
 
-        n_pos = sum(1 for *_, label in self.samples if label == 1.0)
-        n_neg = sum(1 for *_, label in self.samples if label == 0.0)
-        logger.info(f"Dataset: {len(self.samples)} samples ({n_pos} pos, {n_neg} neg)")
+                neg_idx  = np.concatenate([hard_global, random_global]) if n_hard > 0 else random_global
+                neg_embs = vid_matrix[neg_idx]  # already float32
+
+                self.samples.append((user_idx, brand_idx, eng, pos_emb, neg_embs))
+
+        logger.info(
+            f"Dataset: {len(self.samples)} samples "
+            f"(InfoNCE, {n_hard} hard + {n_random} random negs each)"
+        )
 
     @staticmethod
     def _engagement_features(row: pd.Series) -> np.ndarray:
         return np.array([
             float(row["watch_percentage"]) / 100.0,
-            min(float(row["views"]), 5.0) / 5.0,   # cap at 5, normalize
+            min(float(row["views"]), 5.0) / 5.0,
             float(row["likes"]),
             float(row["shares"]),
             float(row["comments"]),
-        ], dtype=np.float32)
-
-    @staticmethod
-    def _avg_engagement(group: pd.DataFrame) -> np.ndarray:
-        return np.array([
-            float(group["watch_percentage"].mean()) / 100.0,
-            min(float(group["views"].mean()), 5.0) / 5.0,
-            float(group["likes"].mean()),
-            float(group["shares"].mean()),
-            float(group["comments"].mean()),
+            float(row.get("link_clicks", 0.0)),
         ], dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple:
-        user_idx, brand_idx, eng, vid_emb, label = self.samples[idx]
+        user_idx, brand_idx, eng, pos_emb, neg_embs = self.samples[idx]
         return (
             torch.tensor(user_idx,  dtype=torch.long),
             torch.tensor(brand_idx, dtype=torch.long),
             torch.tensor(eng,       dtype=torch.float32),
-            torch.tensor(vid_emb,   dtype=torch.float32),
-            torch.tensor(label,     dtype=torch.float32),
+            torch.tensor(pos_emb,   dtype=torch.float32),
+            torch.tensor(neg_embs,  dtype=torch.float32),  # (n_neg, dim)
         )
 
 
@@ -223,6 +254,25 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def info_nce_loss(
+    user_emb: torch.Tensor,
+    pos_emb: torch.Tensor,
+    neg_embs: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    InfoNCE loss: treats the (user, pos_video) pair as the positive and
+    (user, neg_video_i) pairs as negatives.  Cross-entropy over 1+N_neg logits.
+    Temperature=0.07 matches SimCLR/MoCo defaults — produces well-separated embeddings.
+    """
+    # pos_score: (B,1)  neg_scores: (B, n_neg)
+    pos_score  = (user_emb * pos_emb).sum(dim=-1, keepdim=True) / temperature
+    neg_scores = torch.bmm(neg_embs, user_emb.unsqueeze(-1)).squeeze(-1) / temperature
+    logits = torch.cat([pos_score, neg_scores], dim=-1)          # (B, 1+n_neg)
+    labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+    return F.cross_entropy(logits, labels)
+
+
 def train(
     model: TwoTowerModel,
     dataset: EngagementDataset,
@@ -230,6 +280,7 @@ def train(
     batch_size: int = 256,
     lr: float = 1e-3,
     weight_decay: float = 1e-5,
+    temperature: float = 0.07,
 ) -> list[float]:
     device = get_device()
     logger.info(f"Training on {device}")
@@ -239,22 +290,26 @@ def train(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Cosine LR decay — helps with convergence on larger datasets
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    loss_fn = nn.BCEWithLogitsLoss()
 
     epoch_losses = []
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
-        for user_idx, brand_idx, eng, vid_emb, labels in loader:
+        for user_idx, brand_idx, eng, pos_emb, neg_embs in loader:
             user_idx  = user_idx.to(device)
             brand_idx = brand_idx.to(device)
             eng       = eng.to(device)
-            vid_emb   = vid_emb.to(device)
-            labels    = labels.to(device)
+            pos_emb   = pos_emb.to(device)
+            neg_embs  = neg_embs.to(device)   # (B, n_neg, dim)
 
             optimizer.zero_grad()
-            scores = model(user_idx, brand_idx, eng, vid_emb)
-            loss = loss_fn(scores, labels)
+            user_out = model.user_tower(user_idx, brand_idx, eng)   # (B, dim)
+            pos_out  = model.video_tower(pos_emb)                    # (B, dim)
+
+            B, n_neg, in_dim = neg_embs.shape
+            neg_out = model.video_tower(neg_embs.view(B * n_neg, in_dim)).view(B, n_neg, -1)
+
+            loss = info_nce_loss(user_out, pos_out, neg_out, temperature)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()

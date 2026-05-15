@@ -10,7 +10,8 @@ requires-python = ">=3.13"
 dependencies = [
     "clickhouse-connect",
     "opensearch-py[async]",
-    "pandas"
+    "pandas",
+    "pymilvus",
 ]
 
 [build-system]

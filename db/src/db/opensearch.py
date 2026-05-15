@@ -15,13 +15,16 @@ FIELDS = [
     "keywords",
 ]
 
+BATCH_SIZE = 500
 
 def _build_client() -> AsyncOpenSearch:
     return AsyncOpenSearch(
         hosts=[settings.opensearch.url],
         http_auth=(settings.opensearch.user_name, settings.opensearch.password),
         verify_certs=settings.opensearch.os_verify,
+        use_ssl=True,
         ssl_show_warn=False,
+        timeout=180,
     )
 
 
@@ -71,25 +74,69 @@ def _extract_video(hit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def scan_video_ids(brand_id: int | None = None, page_size: int = 1000) -> list[str]:
+    """
+    Scans all video IDs from OpenSearch using search_after pagination.
+    If brand_id is provided, filters by that brand.
+    Returns a flat list of video_id strings.
+    """
+    client = _build_client()
+    try:
+        query: dict[str, Any] = {"match_all": {}} if brand_id is None else {"term": {"brand_id": brand_id}}
+        video_ids: list[str] = []
+        search_after: list | None = None
+
+        while True:
+            body: dict[str, Any] = {
+                "query": query,
+                "_source": False,
+                "size": page_size,
+                "sort": [{"_id": "asc"}],
+            }
+            if search_after:
+                body["search_after"] = search_after
+
+            resp = await client.search(index=VIDEO_INDEX, body=body)
+            hits = resp["hits"]["hits"]
+            if not hits:
+                break
+
+            for hit in hits:
+                video_ids.append(hit["_id"])
+            search_after = hits[-1]["sort"]
+            logger.info(f"  Scanned {len(video_ids)} video IDs so far...")
+
+        logger.info(f"OpenSearch scan complete: {len(video_ids)} video IDs found")
+        return video_ids
+
+    finally:
+        await client.close()
+
+
 async def get_videos_by_ids(video_ids: list[str]) -> list[dict[str, Any]]:
     if not video_ids:
         return []
 
     client = _build_client()
     try:
-        response = await client.mget(
-            body={"ids": video_ids},
-            index=VIDEO_INDEX,
-            _source_includes=FIELDS,
-        )
+        videos: list[dict[str, Any]] = []
+        missing: list[str] = []
 
-        videos = []
-        missing = []
-        for hit in response["docs"]:
-            if hit.get("found"):
-                videos.append(_extract_video(hit))
-            else:
-                missing.append(hit["_id"])
+        batches = [video_ids[i : i + BATCH_SIZE] for i in range(0, len(video_ids), BATCH_SIZE)]
+        logger.info(f"Fetching {len(video_ids)} videos in {len(batches)} batches of up to {BATCH_SIZE}")
+
+        for idx, batch in enumerate(batches, 1):
+            response = await client.mget(
+                body={"ids": batch},
+                index=VIDEO_INDEX,
+                _source_includes=FIELDS,
+            )
+            for hit in response["docs"]:
+                if hit.get("found"):
+                    videos.append(_extract_video(hit))
+                else:
+                    missing.append(hit["_id"])
+            logger.debug(f"  Batch {idx}/{len(batches)} done ({len(batch)} ids)")
 
         if missing:
             logger.warning(

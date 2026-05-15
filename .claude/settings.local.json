@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(python3 *)",
-      "Bash(xargs ls *)"
+      "Bash(xargs ls *)",
+      "Bash(uv run *)",
+      "Bash(uv add *)",
+      "Bash(docker cp *)",
+      "Bash(docker exec *)"
     ]
   }
 }

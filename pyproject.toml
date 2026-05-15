@@ -11,6 +11,9 @@ dependencies = [
     "db",
     "utils",
     "models",
+    "pymilvus>=2.6.12",
+    "google-generativeai>=0.8.6",
+    "google-genai>=1.75.0",
 ]
 
 [tool.uv.workspace]
