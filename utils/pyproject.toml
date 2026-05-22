@@ -13,6 +13,7 @@ dependencies = [
     "pandas",
     "cloudscraper>=1.2.71",
     "beautifulsoup4>=4.13.4",
+    "keybert>=0.8.0",
 ]
 
 [build-system]

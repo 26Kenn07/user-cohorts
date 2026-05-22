@@ -4,6 +4,7 @@ services:
     image: user-cohorts:latest
     container_name: user-cohorts
     network_mode: "container:prod-vpn"
+    env_file: .env
     command: ["sleep", "infinity"]
     stdin_open: true
     tty: true

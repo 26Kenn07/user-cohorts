@@ -25,7 +25,7 @@ def compute_engagement_scores(user_df: pd.DataFrame) -> pd.DataFrame:
         lambda g: g / g.max() if g.max() > 0 else g
     )
 
-    cols = ["user_id", "identity_type", "video_id", "brand_id",
+    cols = ["user_id", "video_id", "brand_id",
             "watch_percentage", "views", "likes", "shares", "comments", "score"]
     if "link_clicks" in df.columns:
         cols.insert(-1, "link_clicks")

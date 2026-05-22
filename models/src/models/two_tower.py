@@ -31,6 +31,10 @@ class VideoTower(nn.Module):
         return F.normalize(self.mlp(x), dim=-1)
 
 
+PAGE_CTX_DIM    = 768   # backbone output dim
+PAGE_CTX_HIDDEN = 128   # projected dim fed into the MLP (was 64)
+
+
 class UserTower(nn.Module):
     """
     YouTube DNN-style user tower.
@@ -38,6 +42,8 @@ class UserTower(nn.Module):
       - user_idx:            learnable per-user embedding (0 = unknown/new user)
       - brand_idx:           learnable per-brand embedding
       - engagement_features: raw signals (watch_ratio, views, likes, shares, comments)
+      - page_ctx_emb:        (optional) 768d page context embedding; ignored when
+                             use_page_ctx=False so old checkpoints stay compatible.
 
     New users get user_idx=0 (padding_idx) — model falls back to brand + engagement signals.
     Returning users get their learned preference embedding.
@@ -49,8 +55,11 @@ class UserTower(nn.Module):
         user_embed_dim: int = 128,
         brand_embed_dim: int = 64,
         output_dim: int = 512,
+        use_page_ctx: bool = False,
     ):
         super().__init__()
+        self.use_page_ctx = use_page_ctx
+
         # padding_idx=0 → new users get zero embedding, not updated during training
         self.user_embed    = nn.Embedding(n_users + 1, user_embed_dim, padding_idx=0)
         self.brand_embed   = nn.Embedding(n_brands, brand_embed_dim)
@@ -60,6 +69,15 @@ class UserTower(nn.Module):
         )
 
         mlp_input_dim = user_embed_dim + brand_embed_dim + 64
+        if use_page_ctx:
+            self.page_ctx_fc = nn.Sequential(
+                nn.Linear(PAGE_CTX_DIM, 256),
+                nn.ReLU(),
+                nn.Linear(256, PAGE_CTX_HIDDEN),
+                nn.ReLU(),
+            )
+            mlp_input_dim += PAGE_CTX_HIDDEN
+
         self.mlp = nn.Sequential(
             nn.Linear(mlp_input_dim, 512),
             nn.LayerNorm(512),
@@ -75,11 +93,20 @@ class UserTower(nn.Module):
         user_idx: torch.Tensor,
         brand_idx: torch.Tensor,
         engagement: torch.Tensor,
+        page_ctx_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         u = self.user_embed(user_idx)
         b = self.brand_embed(brand_idx)
         e = self.engagement_fc(engagement)
-        return F.normalize(self.mlp(torch.cat([u, b, e], dim=-1)), dim=-1)
+        parts = [u, b, e]
+
+        if self.use_page_ctx:
+            if page_ctx_emb is not None:
+                parts.append(self.page_ctx_fc(page_ctx_emb))
+            else:
+                parts.append(torch.zeros(u.shape[0], PAGE_CTX_HIDDEN, device=u.device))
+
+        return F.normalize(self.mlp(torch.cat(parts, dim=-1)), dim=-1)
 
 
 class TwoTowerModel(nn.Module):
@@ -90,9 +117,10 @@ class TwoTowerModel(nn.Module):
         backbone_dim: int = 768,
         output_dim: int = 512,
         temperature: float = 10.0,
+        use_page_ctx: bool = False,
     ):
         super().__init__()
-        self.user_tower  = UserTower(n_users, n_brands, output_dim=output_dim)
+        self.user_tower  = UserTower(n_users, n_brands, output_dim=output_dim, use_page_ctx=use_page_ctx)
         self.video_tower = VideoTower(backbone_dim, output_dim)
         self.temperature = temperature
 
@@ -102,8 +130,9 @@ class TwoTowerModel(nn.Module):
         brand_idx: torch.Tensor,
         engagement: torch.Tensor,
         video_emb: torch.Tensor,
+        page_ctx_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        user_out  = self.user_tower(user_idx, brand_idx, engagement)
+        user_out  = self.user_tower(user_idx, brand_idx, engagement, page_ctx_emb)
         video_out = self.video_tower(video_emb)
         return (user_out * video_out).sum(dim=-1) * self.temperature
 
@@ -142,12 +171,16 @@ class IndexMaps:
 
 class EngagementDataset(Dataset):
     """
-    Each sample: (user_idx, brand_idx, engagement_features, pos_vid_emb, neg_vid_embs)
+    Each sample: (user_idx, brand_idx, engagement_features, pos_vid_emb, neg_vid_embs, page_ctx_emb)
 
     Structured for InfoNCE loss — each positive is paired with negative_ratio negatives.
     Positives: rows with score >= positive_threshold
     Negatives: hard_negative_ratio semantically similar (backbone cosine) unwatched videos
                + (negative_ratio - hard_negative_ratio) random unwatched videos.
+
+    page_ctx_emb is a 768d vector per (user, brand). Pass user_page_ctx_map to enable it;
+    omit (or pass None) for backward-compatible behaviour (zeros are stored, model ignores them
+    when use_page_ctx=False).
     """
     def __init__(
         self,
@@ -157,9 +190,11 @@ class EngagementDataset(Dataset):
         positive_threshold: float = 0.1,
         negative_ratio: int = 4,
         hard_negative_ratio: int = 2,
+        user_page_ctx_map: dict[str, np.ndarray] | None = None,
     ):
         self.samples: list[tuple] = []
         self.negative_ratio = negative_ratio
+        self._page_ctx_map  = user_page_ctx_map or {}
         all_video_ids = list(video_embeddings.keys())
 
         # Precompute normalized video matrix for fast cosine similarity
@@ -214,7 +249,11 @@ class EngagementDataset(Dataset):
                 neg_idx  = np.concatenate([hard_global, random_global]) if n_hard > 0 else random_global
                 neg_embs = vid_matrix[neg_idx]  # already float32
 
-                self.samples.append((user_idx, brand_idx, eng, pos_emb, neg_embs))
+                page_ctx = self._page_ctx_map.get(
+                    f"{user_id}::{brand_id}",
+                    np.zeros(PAGE_CTX_DIM, dtype=np.float32),
+                )
+                self.samples.append((user_idx, brand_idx, eng, pos_emb, neg_embs, page_ctx))
 
         logger.info(
             f"Dataset: {len(self.samples)} samples "
@@ -236,13 +275,14 @@ class EngagementDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple:
-        user_idx, brand_idx, eng, pos_emb, neg_embs = self.samples[idx]
+        user_idx, brand_idx, eng, pos_emb, neg_embs, page_ctx = self.samples[idx]
         return (
             torch.tensor(user_idx,  dtype=torch.long),
             torch.tensor(brand_idx, dtype=torch.long),
             torch.tensor(eng,       dtype=torch.float32),
             torch.tensor(pos_emb,   dtype=torch.float32),
             torch.tensor(neg_embs,  dtype=torch.float32),  # (n_neg, dim)
+            torch.tensor(page_ctx,  dtype=torch.float32),  # (768,)
         )
 
 
@@ -295,15 +335,16 @@ def train(
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
-        for user_idx, brand_idx, eng, pos_emb, neg_embs in loader:
+        for user_idx, brand_idx, eng, pos_emb, neg_embs, page_ctx in loader:
             user_idx  = user_idx.to(device)
             brand_idx = brand_idx.to(device)
             eng       = eng.to(device)
             pos_emb   = pos_emb.to(device)
             neg_embs  = neg_embs.to(device)   # (B, n_neg, dim)
+            page_ctx  = page_ctx.to(device)   # (B, 768)
 
             optimizer.zero_grad()
-            user_out = model.user_tower(user_idx, brand_idx, eng)   # (B, dim)
+            user_out = model.user_tower(user_idx, brand_idx, eng, page_ctx)   # (B, dim)
             pos_out  = model.video_tower(pos_emb)                    # (B, dim)
 
             B, n_neg, in_dim = neg_embs.shape
@@ -343,10 +384,12 @@ def get_user_embedding(
     user_idx: int,
     brand_idx: int,
     engagement: np.ndarray,
+    page_ctx_emb: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Produces a user embedding at inference time.
     Works for both new users (user_idx=0) and returning users.
+    Pass page_ctx_emb (768d) when model was trained with use_page_ctx=True.
     """
     device = next(model.parameters()).device
     model.eval()
@@ -354,4 +397,5 @@ def get_user_embedding(
         u = torch.tensor([user_idx],  dtype=torch.long).to(device)
         b = torch.tensor([brand_idx], dtype=torch.long).to(device)
         e = torch.tensor(engagement,  dtype=torch.float32).unsqueeze(0).to(device)
-        return model.user_tower(u, b, e).squeeze(0).cpu().numpy()
+        p = torch.tensor(page_ctx_emb, dtype=torch.float32).unsqueeze(0).to(device) if page_ctx_emb is not None else None
+        return model.user_tower(u, b, e, p).squeeze(0).cpu().numpy()

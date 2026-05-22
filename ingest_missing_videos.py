@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 MILVUS_URI       = os.environ.get("MILVUS_URI", "http://localhost:19530")
-VIDEO_COLLECTION = os.environ.get("VIDEO_COLLECTION", "video_embeddings")
+VIDEO_COLLECTION = os.environ.get("VIDEO_COLLECTION", "cohort_video_embeddings")
 INGEST_BATCH     = 500
 
 

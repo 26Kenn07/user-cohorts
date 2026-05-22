@@ -29,8 +29,8 @@ class MilvusConfig(BaseSettings):
     model_config = MODEL_CONFIG
     
     uri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
-    video_collection: str = Field(default="video_embeddings", alias="VIDEO_COLLECTION")
-    user_collection: str = Field(default="user_embeddings", alias="USER_COLLECTION")
+    video_collection: str = Field(default="cohort_video_embeddings", alias="VIDEO_COLLECTION")
+    user_collection: str = Field(default="cohort_user_embeddings", alias="USER_COLLECTION")
     
     
     

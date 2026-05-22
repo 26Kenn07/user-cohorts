@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 BRAND_IDS  = "(1729, 2023, 2075, 2556, 2558, 2314, 2357, 2476, 2557, 2701, 2764, 2790, 2793, 2801, 2808, 3099)"
 DATE_START = "2025-05-01"
-DATE_END   = "2026-04-29"
+DATE_END   = "2026-05-19"
 BATCH_SIZE = 50_000
 MIN_EVENTS = 10
-OUT_FILE   = "new_ck_user_events.csv"
+OUT_FILE   = "ck_user_events.csv"
 
 
 async def fetch() -> None:

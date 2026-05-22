@@ -29,8 +29,8 @@ load_dotenv()
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
 MILVUS_URI       = os.environ.get("MILVUS_URI", "http://localhost:19530")
-VIDEO_COLLECTION = os.environ.get("VIDEO_COLLECTION", "video_embeddings")
-USER_COLLECTION  = os.environ.get("USER_COLLECTION", "user_embeddings")
+VIDEO_COLLECTION = os.environ.get("VIDEO_COLLECTION", "cohort_video_embeddings")
+USER_COLLECTION  = os.environ.get("USER_COLLECTION", "cohort_user_embeddings")
 CACHE_DIR        = Path(os.environ.get("CACHE_DIR", "./cache"))
 N_PROMPTS        = 5
 

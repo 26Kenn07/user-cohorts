@@ -45,10 +45,10 @@ A brand-new user has no history. We still need to assign them to a cohort quickl
 
 ## 2. Our Approach — The Journey
 
-### First Instinct: Just Cluster Users
+### First Instinct: Just Clustewar Users
 The simplest approach is to take user engagement data, compute some representation per user, and run K-Means clustering. We tried this — and hit a problem.
 
-> **Problem:** Clustering raw engagement data or simple user averages produced cohorts that were separated by *which brand the user was on*, not by *what content they liked*. A user on iHear and a user on a car brand were in different clusters even if they both loved celebrity content.
+> **Problem:** Clustering raw engagement data or simple user averages produced cohorts that were separated by *which brand the user was on*, not by *what content they liked*. A user on iHeart and a user on a car brand were in different clusters even if they both loved celebrity content.
 
 ### The Discovery: Two-Tower Model
 While exploring better representations, we came across the **Two-Tower Neural Network** — the same architecture used by YouTube and Pinterest for recommendations. The key insight was:
@@ -67,7 +67,7 @@ We flipped the approach:
 This produces cohorts that cleanly represent content interests — completely independent of which brand the user is on.
 
 ### The Bonus Discovery
-Once the Two-Tower model was trained to produce good user and video embeddings for cohort generation, we realised the **same embeddings could power a personalised feed** — by ranking videos by their dot-product similarity to a user's embedding vector. This is covered in [Section 7](#7-extension--personalised-video-feed) as an extension that comes for free from the same infrastructure.
+Once the Two-Tower model was trained to produce good user and video embeddings for cohort generation, wawe realised the **same embeddings could power a personalised feed** — by ranking videos by their dot-product similarity to a user's embedding vector. This is covered in [Section 7](#7-extension--personalised-video-feed) as an extension that comes for free from the same infrastructure.
 
 ---
 
@@ -114,13 +114,13 @@ We combine all engagement signals into a single score per `(user, video)` intera
 
 ```
 score = (watch_percentage/100 × 1.0)
-      + (min(views, 5)/5    × 0.5)
+      + (min(views, 3)/1    × 0.5)   ← capped at 3 to reduce loop noise
       + (likes               × 3.0)
       + (shares              × 5.0)   ← strongest signal
       + (comments            × 3.0)
 ```
 
-Shares are weighted highest — a user sharing a video is the strongest possible signal of interest. Scores are normalised per brand so high-activity brands don't dominate.
+Shares are weighted highest — a user sharing a video is the strongest possible signal of interest. Scores are normalised **per brand** (each brand's maximum score becomes 1.0), so a single highly-engaged outlier user on one brand cannot collapse scores for all other brands to near zero.
 
 ### The User Tower
 The user tower is a neural network that takes three inputs and produces a 512d preference vector:
@@ -142,12 +142,19 @@ L2 Normalise → 512d user preference vector
 **New users** get `user_idx=0` (zero embedding). The model falls back to brand context + engagement features — enough to serve cohort-level recommendations on day one.
 
 ### Training
-The model is trained to give **high dot-product scores** to `(user, video)` pairs where the user engaged, and **low scores** to random unwatched videos.
+The model is trained using **InfoNCE loss** (the same contrastive objective used by YouTube, SimCLR, and MoCo). For each positive `(user, video)` pair, 4 random unwatched videos are drawn as negatives. The model must identify the positive from the 5-way choice — this directly forces the embeddings apart rather than just learning a relative threshold.
 
-- Positives: interactions with engagement score ≥ 0.05
-- Negatives: 4 random unwatched videos per positive
-- Loss: Binary Cross-Entropy
-- Optimiser: AdamW + Cosine LR decay, 50 epochs
+```
+For each positive (user, video) interaction:
+  Negatives: 4 random unwatched videos
+  Loss: cross-entropy over [pos_score, neg1_score, neg2_score, neg3_score, neg4_score]
+  Temperature: 0.07  ← sharp separation, same as SimCLR/MoCo
+```
+
+- Positives: interactions with per-brand normalised score ≥ 0.05 (~71,000 training samples)
+- Optimiser: AdamW + Cosine LR decay, 50 epochs, gradient clipping
+
+**Why InfoNCE over Binary Cross-Entropy:** BCE only learns that positive scores should be higher than negative scores — it does not control the absolute values. In practice BCE-trained models produce cosine similarities of 0.03–0.09 across all pairs, making ANN search unreliable. InfoNCE explicitly maximises the ratio of positive to negative similarity, producing cosine similarities in the 0.4–0.8 range.
 
 ---
 
@@ -157,56 +164,80 @@ The model is trained to give **high dot-product scores** to `(user, video)` pair
 We run K-Means clustering on video embeddings for k=3 to k=8 and measure how well-separated the clusters are using the **silhouette score** (range: -1 to +1, higher = better separation):
 
 ```
-k=3: 0.2263
-k=4: 0.2407
-k=5: 0.2470  ← optimal
-k=6: 0.1691
-k=7: 0.1686
-k=8: 0.1570
+k=3: 0.2993  ← optimal
+k=4: 0.2269
+k=5: 0.2455
+k=6: 0.2514
+k=7: 0.2678
+k=8: 0.2744
 ```
 
-k=5 was automatically selected.
+k=3 was automatically selected. The InfoNCE-trained embeddings produce tighter, more separable clusters than the previous model — the optimal k dropped from 5 to 3 and the best silhouette score improved from 0.2470 to 0.2993.
 
-### Step 2 — Cluster 9,629 Videos into 5 Content Topics
+### Step 2 — Cluster 9,629 Videos into 3 Content Topics
 
-K-Means groups videos with similar content embeddings together. The 5 resulting clusters are content-coherent — all car videos land in one cluster, all celebrity interviews in another, and so on.
+K-Means groups videos with similar content embeddings together. The 3 resulting clusters are content-coherent — all celebrity content lands in one cluster, event coverage in another, and so on.
 
 ### Step 3 — Assign Users to Cohorts
 For each user, we look at what they watched and calculate what fraction of their total engagement falls in each content cluster:
 
 ```
 Example user engagement breakdown:
-  Cohort 0 (Celebrity):   72% → assigned ✓  (above 15% threshold)
-  Cohort 2 (Automotive):  21% → assigned ✓  (above 15% threshold)
-  Cohort 4 (Empowerment):  7% → not assigned (below threshold)
+  Cohort 1 (Glamorous Events): 68% → assigned ✓  (above 15% threshold)
+  Cohort 2 (Celebrity News):   25% → assigned ✓  (above 15% threshold)
+  Cohort 0 (Events/Talks):      7% → not assigned (below threshold)
 
-Result: this user belongs to cohorts [0, 2]
+Result: this user belongs to cohorts [1, 2]
 ```
 
-**25% of users (34,244 of 134,594) belong to multiple cohorts** — reflecting genuinely diverse interests. This is a feature, not a limitation.
+**16% of users (21,498 of 134,594) belong to multiple cohorts** — reflecting genuinely diverse interests. This is a feature, not a limitation.
 
 ### Step 4 — Name Each Cohort with Gemini
-Rather than displaying raw keywords, we send 15 representative video descriptions from each cluster to **Gemini 2.5 Flash**, which generates a human-readable label and description. This runs once at training time (5 API calls).
+Rather than displaying raw keywords, we send 15 representative video descriptions from each cluster to **Gemini 2.5 Flash**, which generates a human-readable label and description. This runs once at training time (3 API calls).
 
 ### Final Cohorts
 
-| ID | Label | Videos | Users | Description |
-|---|---|---|---|---|
-| 0 | Celebrity News & Life | 1,416 | ~84,000 | Updates on celebrity events, personal lives, and controversies |
-| 1 | Life Experiences & Events | 5,084 | ~92,000 | People share personal experiences, emotions, and styles at diverse events |
-| 2 | Car Features & Deals | 1,783 | ~17,000 | Showcasing car models, highlighting features, design, interiors, and promotional offers |
-| 3 | Public Figure Conversations | 723 | ~18,000 | Interviews and discussions with public figures about their lives, shows, and relationships |
-| 4 | Empowerment & Expression | 623 | ~15,000 | Individuals share insights, express themselves, and inspire personal growth |
+| ID | Label | Videos | Description |
+|---|---|---|---|
+| 0 | Events, Discussions & Presentations | 1,164 | Diverse content featuring public events, conversations, speeches, and media presentations |
+| 1 | Glamorous Event Scenes | 2,543 | Celebrity appearances, fashion, and lively interactions at public events |
+| 2 | Celebrity News & Scandals | 5,922 | Public figures' personal lives, relationships, events, and serious legal controversies |
 
 ---
 
 ## 6. Generating Personalised Prompts
 
-### How It Works
-Each cohort has a well-defined content identity. We use **Claude (Sonnet)** to generate 5 short, natural-language search prompts per cohort — the kind of query a user in that cohort would naturally type.
+Prompt generation works at three levels of personalisation, all powered by **Gemini 2.5 Flash**:
 
-**Input to Claude:** top engagement-weighted keywords from videos in that cohort  
+### Level 1 — User Prompts (cohort-based)
+Given a `user_id` and `brand_id`, the system looks up the user's cohort(s) in Milvus and generates prompts matching their established content interests.
+
+```bash
+uv run suggest.py user <user_id> --brand-id <brand_id>
+```
+
+**Input to Gemini:** cohort label + description + top engagement-weighted keywords  
 **Output:** 5 search prompts, 3–8 words each
+
+### Level 2 — Video Prompts (content-based)
+Given a `video_id`, the system fetches the video's description and transcript from OpenSearch and generates prompts a viewer of that video would naturally search for.
+
+```bash
+uv run suggest.py video <video_id>
+```
+
+**Input to Gemini:** video description, AI-generated description, keywords  
+**Output:** 5 prompts relevant to that specific video's content
+
+### Level 3 — Combined Prompts (user + video)
+The most personalised mode: blends the user's long-term cohort interests with the specific video they are currently watching. Ideal for "what to search next" suggestions shown while a video is playing.
+
+```bash
+uv run suggest.py user-video <user_id> --brand-id <brand_id> --video-id <video_id>
+```
+
+**Input to Gemini:** user cohort context + video content  
+**Output:** 5 prompts relevant to both the user's interests and the current video
 
 ### Example Prompts by Cohort
 
@@ -231,14 +262,18 @@ New user opens app
         ↓
 Assigned to cohort(s) based on first few interactions
         ↓
-Served prompts from their cohort(s)
+suggest.py user → prompts from their cohort(s)
+        ↓
+User opens a video
+        ↓
+suggest.py user-video → prompts blending cohort + video context
         ↓
 As engagement history grows → cohort assignment refines
         ↓
 Prompts become more precise over time
 ```
 
-For multi-cohort users, prompts from all their cohorts are shown (interleaved or rotated).
+For multi-cohort users, context from all their cohorts is passed to Gemini in a single call — it naturally blends the themes.
 
 ---
 
@@ -265,27 +300,36 @@ Feed use:      user vector  →  rank all videos by dot-product similarity
 
 | Metric | Our Model | Random | Improvement |
 |---|---|---|---|
-| Recall@10 | 5.1% | 0.10% | **51× better** |
-| Recall@20 | 6.1% | 0.21% | **29× better** |
-| Recall@50 | 8.5% | 0.52% | **16× better** |
-| Cosine Gap | **0.31** | ~0.00 | strong signal |
+| Recall@10 | **10.15%** | 0.10% | **101× better** |
+| Recall@20 | **15.86%** | 0.21% | **75× better** |
+| Recall@50 | **26.96%** | 0.52% | **52× better** |
+| Cosine Gap | **0.58** | ~0.00 | strong signal |
 
-> Recall@10 = 5.1% means: the model surfaces the video a user will actually engage with next inside the top 10 results (out of ~10,000 videos) 5% of the time. Random chance would be 0.1%.
+> Recall@10 = 10.15% means: the model surfaces the video a user will actually engage with next inside the top 10 results (out of ~10,000 videos) 10% of the time. Random chance would be 0.1%.
 
 ### Inference Options Available Today
 
 ```bash
 # What videos should I show this user? (personalised feed)
-infer.py user-to-video <user_id> --brand-id <brand_id>
+uv run infer.py user-to-video <user_id> --brand-id <brand_id>
 
 # What other videos are like this one? (content similarity)
-infer.py video-to-video <video_id>
+uv run infer.py video-to-video <video_id>
 
 # Which users would most enjoy this video? (creator tools)
-infer.py video-to-user <video_id>
+uv run infer.py video-to-user <video_id>
 
 # Which users have similar taste to this user? (cohort exploration)
-infer.py user-to-user <user_id> --brand-id <brand_id>
+uv run infer.py user-to-user <user_id> --brand-id <brand_id>
+
+# What should this user search for? (suggested prompts)
+uv run suggest.py user <user_id> --brand-id <brand_id>
+
+# What prompts relate to this video?
+uv run suggest.py video <video_id>
+
+# Prompts matching both user interest and current video
+uv run suggest.py user-video <user_id> --brand-id <brand_id> --video-id <video_id>
 ```
 
 ---
@@ -336,10 +380,11 @@ Gap = 0.31 → users are measurably closer to content they engage with
 
 | Metric | Model | Random | Lift |
 |---|---|---|---|
-| Recall@10 | 5.1% | 0.10% | **51×** |
-| Recall@20 | 6.1% | 0.21% | **29×** |
-| Recall@50 | 8.5% | 0.52% | **16×** |
-| Cosine Gap | 0.31 | ~0.00 | strong |
+| Recall@10 | **10.15%** | 0.10% | **101×** |
+| Recall@20 | **15.86%** | 0.21% | **75×** |
+| Recall@50 | **26.96%** | 0.52% | **52×** |
+| MRR | **0.089** | — | correct video at rank ~11 avg |
+| Cosine Gap | **0.58** | ~0.00 | strong |
 
 ---
 
@@ -377,14 +422,19 @@ Engagement Scoring          Text Embedding
    Cohort Assignment (user → cohorts[])
         │
         ├──► Gemini 2.5 Flash → Cohort Labels
-        └──► Claude Sonnet   → Suggested Prompts
+        └──► Claude Sonnet   → Cohort-level Prompts
                 │
                 ▼
            Milvus Vector DB
       (video_embeddings + user_embeddings)
                 │
-                ▼
-     Personalised Feed + Suggested Prompts
+          ┌─────┴──────────────────────────┐
+          ▼                                ▼
+   infer.py                          suggest.py
+   (ANN search)                      (Gemini 2.5 Flash)
+   user→video feed                   user mode   → cohort-based prompts
+   video→video similar               video mode  → content-based prompts
+   video→user targeting              user+video  → blended prompts
 ```
 
 ### Storage
@@ -392,6 +442,9 @@ Engagement Scoring          Text Embedding
 |---|---|---|---|
 | `video_embeddings` | 9,629 | 512d | Feed ranking, cohort membership |
 | `user_embeddings` | 134,594 | 512d | Feed ranking, cohort assignment |
+
+### Model Checkpoint
+`cache/two_tower.pt` — saved after training. Loaded by `suggest.py` and `infer.py` at inference time via Milvus (embeddings are pre-computed and stored; the model itself is not needed at query time).
 
 ---
 
@@ -406,6 +459,8 @@ Engagement Scoring          Text Embedding
 | Collaborative filtering | Cannot handle new videos; ignores content meaning |
 | Per-brand separate models | Too little data per brand; misses cross-brand user behaviour |
 | User embedding clustering | Brand embedding in user tower caused brand-geography clustering |
+| BCE loss for two-tower training | Only learns relative ordering — produces cosine sims of 0.03–0.09, making ANN search unreliable |
+| Global score normalisation | One outlier user (score 246×) collapses all other users' scores to near zero, starving the training dataset |
 
 ### Why Video-Based Cohorts Win
 Clustering videos by content (not users) produces topic-pure clusters because:
@@ -418,6 +473,11 @@ Clustering videos by content (not users) produces topic-pure clusters because:
 - The same embeddings serve both cohort assignment and feed ranking
 - Handles new users (zero embedding falls back to brand + engagement features)
 - Scales to millions of users and videos without retraining
+
+### Why InfoNCE over BCE
+- InfoNCE directly maximises the ratio of positive to negative similarity — embeddings are pulled apart, not just ranked
+- Produces cosine similarities in the 0.4–0.8 range (vs 0.03–0.09 with BCE), making ANN search in Milvus meaningful
+- Temperature=0.07 provides sharp gradient signal per sample, learning efficiently even from modest datasets
 
 ---
 

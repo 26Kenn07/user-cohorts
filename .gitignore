@@ -11,3 +11,12 @@ wheels/
 
 
 .env
+cleaned_url*
+new_cache/
+old_cache/
+*.csv
+
+*.pkl
+*.pt
+*.log
+*.npy

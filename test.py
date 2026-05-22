@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-CSV_FILE         = "new_ck_user_events.csv"
+CSV_FILE         = "ck_user_events.csv"
 VIDEO_CSV_FILE   = "new_video_data.csv"
 MIN_INTERACTIONS = 10
 TEST_RATIO       = 0.2

@@ -25,10 +25,6 @@ async def get_urls(limit: int, offset: int):
             ) AS user_id,
             url,
             multiIf(
-                context_device_advertising_id <> '', 'ad_id',
-                'id_id'
-            ) AS identity_type,
-            multiIf(
                 video_id <> '', replaceAll(video_id, '"', ''),
                 replaceAll(content_id, '"', '')
             ) AS video_id,
@@ -67,7 +63,7 @@ async def get_urls(limit: int, offset: int):
             )
             AND report_date BETWEEN '2025-05-01' AND '2026-04-29'
             AND event_record_screen NOT IN ('view_embed', 'view_placement', '', 'feed', 'carousel')
-        GROUP BY brand_id, user_id, url, identity_type, video_id, report_date
+        GROUP BY brand_id, user_id, url, video_id, report_date
         HAVING views >= 1
         ),
         qualified_users AS (
@@ -121,13 +117,11 @@ async def get_user_data_by_brand_id(
         SELECT
             brand_id,
             multiIf(
-                context_device_advertising_id <> '', context_device_advertising_id,
-                identity_id
+                gen_user_id != '', gen_user_id,
+                user_id != '', user_id,
+                ''
             ) AS user_id,
-            multiIf(
-                context_device_advertising_id <> '', 'ad_id',
-                'id_id'
-            ) AS identity_type,
+            context_source_type,
             multiIf(
                 video_id <> '', replaceAll(video_id, '"', ''),
                 replaceAll(content_id, '"', '')
@@ -167,14 +161,14 @@ async def get_user_data_by_brand_id(
           )
           AND report_date BETWEEN '{start_date}' AND '{end_date}'
           AND event_record_screen NOT IN ('view_embed', 'view_placement', '', 'feed', 'carousel')
-        GROUP BY brand_id, user_id, identity_type, video_id, report_date
+        GROUP BY brand_id, user_id, context_source_type, video_id, report_date
         HAVING views >= 1
     ),
     qualified_users AS (
         SELECT brand_id, user_id
         FROM agg
         GROUP BY brand_id, user_id
-        HAVING count(*) > {min_events}
+        HAVING count(*) >= {min_events}
     )
     SELECT agg.*
     FROM agg
